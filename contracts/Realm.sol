@@ -56,7 +56,7 @@ contract Realm is ERC721, ReentrancyGuard {
 		"Cave",
 		"Desert",
 		"Forest",
-		"Tundra"
+		"Tundra",
 	];
 
 	string[] public resourceTypes = [
@@ -247,10 +247,25 @@ contract Realm is ERC721, ReentrancyGuard {
 		return super.supportsInterface(interfaceId);
 	}
 
-	function emitTokenURIs(uint256 tokenId, uint256 count) public {
-		for (uint256 i = tokenId; i < tokenId + count; i++) {
-			emit GenerateTokenURI(tokenURI(i));
+	function emitCellData(uint256 tokenId) public {
+		uint256 rterr = uint256(keccak256(abi.encodePacked("TERRAIN", tokenId)));
+		uint256 rnres = uint256(keccak256(abi.encodePacked("NRESOURCES", tokenId)));
+		
+		string memory terrain = terrainTypes[rterr % terrainTypes.length];
+		string[2] memory resources;
+		
+		uint256 _n = 3;
+		uint256 nres = 0;
+		if (rnres % _n < 1) {
+			nres = 2;		
+			resources[0] = Util.pickResource(tokenId, "FIRST", resourceTypes, resourceAbundance, "");
+			resources[1] = Util.pickResource(tokenId, "SECOND", resourceTypes, resourceAbundance, resources[0]);
+		} else if (rnres % _n < 3) {
+			nres = 1;
+			resources[0] = Util.pickResource(tokenId, "FIRST", resourceTypes, resourceAbundance, "");
 		}
+		
+		emit GenerateTokenURI(terrain, resources[0], resources[1]);
 	}
 
 	function tokenURI(uint256 tokenId) override public view returns (string memory) {
@@ -264,11 +279,11 @@ contract Realm is ERC721, ReentrancyGuard {
 		uint256 nres = 0;
 		if (rnres % _n < 1) {
 			nres = 2;		
-			resources[0] = Util.pickResource(tokenId, "RESOURCE0", resourceTypes, resourceAbundance);
-			resources[1] = Util.pickResource(tokenId, "RESOURCE1", resourceTypes, resourceAbundance);
+			resources[0] = Util.pickResource(tokenId, "FIRST", resourceTypes, resourceAbundance, "");
+			resources[1] = Util.pickResource(tokenId, "SECOND", resourceTypes, resourceAbundance, resources[0]);
 		} else if (rnres % _n < 3) {
 			nres = 1;
-			resources[0] = Util.pickResource(tokenId, "RESOURCE0", resourceTypes, resourceAbundance);
+			resources[0] = Util.pickResource(tokenId, "FIRST", resourceTypes, resourceAbundance, "");
 		}
 		
 		return Util._tokenURI(tokenId, terrain, resources, nres);
@@ -281,6 +296,6 @@ contract Realm is ERC721, ReentrancyGuard {
 	event EdgeDestroyed(uint256 indexed fromCellIndex, uint256 fromEdgeIndex, uint256 toCellIndex, uint256 toEdgeIndex);
 	event PutContent(uint256 cellIndex, address indexed contractAddress, uint256 tokenId, uint256 sealValue, address indexed sealOwner);
 	event TakeContent(uint256 cellIndex, address indexed contractAddress, uint256 tokenId, uint256 sealValue, address indexed sealOwner, address indexed takenBy);
-	event GenerateTokenURI(string uri);
+	event GenerateTokenURI(string terrain, string resource0, string resource1);
 }
 

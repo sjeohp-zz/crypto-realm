@@ -4,7 +4,11 @@ pragma solidity ^0.8.0;
 import "./Base64.sol";
 
 library Util {
-    function pickResource(uint256 tokenId, string memory keyPrefix, string[] memory resources, uint256[] memory resourceAbundance) public pure returns (string memory) {
+	function compareStrings (string memory a, string memory b) public pure returns (bool) {
+		return (keccak256(abi.encodePacked((a))) == keccak256(abi.encodePacked((b))));
+	}
+
+    function pickResource(uint256 tokenId, string memory keyPrefix, string[] memory resources, uint256[] memory resourceAbundance, string memory exclude) public pure returns (string memory) {
         uint resourceAbundanceSum = 0;		
 		for (uint i=0; i<resourceAbundance.length; i++) {
 			resourceAbundanceSum += resourceAbundance[i];
@@ -15,6 +19,9 @@ library Util {
 		while (acc < r) {
 			acc += resourceAbundance[x];
 			x += 1;
+		}
+		if (compareStrings(resources[x], exclude)) {
+			return resources[x + 1 % resources.length];
 		}
 		return resources[x];
     }
