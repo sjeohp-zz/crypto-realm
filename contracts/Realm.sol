@@ -5,12 +5,13 @@ import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 
-contract Realm is ERC721, ERC721Enumerable, IERC721Receiver {
+contract Realm is ERC721, ERC721Enumerable, IERC721Receiver, ReentrancyGuard {
 	using SafeMath for uint256;
 
-	address private _owner;
+	address private _creator;
 
 	uint256 public SUPPLY_INDEX = 1;
     uint256 public SUPPLY_LIMIT = 1;
@@ -18,6 +19,7 @@ contract Realm is ERC721, ERC721Enumerable, IERC721Receiver {
 	uint256 public GENERATION = 0;
 	
 	uint256 public constant MAX_SUPPLY = 8088;
+	uint256 public constant CREATOR_RESERVED = 1011;
 	uint256 public constant MAX_CLAIM = 8;
 	uint256 public constant MAX_EDGES = 6;
 	uint256 public constant MAX_CONTENTS = 16;
@@ -25,9 +27,9 @@ contract Realm is ERC721, ERC721Enumerable, IERC721Receiver {
 	// IPFS hash
 	string[MAX_SUPPLY] public cellDescriptionIds;
 	uint256[MAX_SUPPLY] public cellGenerations;
-	CellContent[MAX_SUPPLY][MAX_CONTENTS] public cellContents;
-	uint256[MAX_SUPPLY][MAX_EDGES] public edges;
-	uint256[MAX_SUPPLY][MAX_EDGES] public edgesOffered;
+	CellContent[MAX_CONTENTS][MAX_SUPPLY] public cellContents;
+	uint256[MAX_EDGES][MAX_SUPPLY] public edges;
+	uint256[MAX_EDGES][MAX_SUPPLY] public edgesOffered;
 	mapping (uint256 => EdgeOfferFrom[]) public edgeOffersReceived;
 
 	struct CellContent {
@@ -56,39 +58,45 @@ contract Realm is ERC721, ERC721Enumerable, IERC721Receiver {
 		"Swamp"
 	];
 
-	uint256 private constant _NOT_ENTERED = 1;
-    uint256 private constant _ENTERED = 2;
-    uint256 private _status = _NOT_ENTERED;
-
-	constructor() ERC721("Realm", "Re") {
-		_owner = _msgSender();
+	constructor() ERC721("Realm", "R") {
+		_creator = _msgSender();
 		// Remove token 0 from supply so edges to 0 work as null
 		_safeMint(address(this), 0);
+		_burn(0);
 	}
 	
     function increaseSupply(uint256 additional, uint256 price) external {
-        require(msg.sender == _owner);
+        require(msg.sender == _creator);
         require(SUPPLY_INDEX == SUPPLY_LIMIT, "Limit not reached");
-	    require(SUPPLY_LIMIT + additional <= MAX_SUPPLY, "Max supply");
+	    require(SUPPLY_LIMIT + additional <= MAX_SUPPLY - CREATOR_RESERVED, "Max supply");
 		PRICE = price;
 		GENERATION += 1;
         SUPPLY_LIMIT += additional;
     }
     
 	// Mint a cell
-	function claimNext(uint256 count) public payable {
+	function claimNext(address to, uint256 count) external payable nonReentrant {
 	    require(SUPPLY_INDEX + count <= SUPPLY_LIMIT, "Count too high");
 		require(count <= MAX_CLAIM, "Count too high");
 		require(msg.value >= PRICE.mul(count), "Value too low");
-		require(_status == _NOT_ENTERED);
-		_status = _ENTERED;
 		for (uint i=0; i<count; i++) {
 			cellGenerations[SUPPLY_INDEX] = GENERATION;
-			_safeMint(msg.sender, SUPPLY_INDEX);
+			_safeMint(to, SUPPLY_INDEX);
 			emit CreateCell(SUPPLY_INDEX);
 			SUPPLY_INDEX += 1;
 		}
-		_status = _NOT_ENTERED;
+    }
+
+	function claimCreator(address to, uint256 count) external {
+        require(msg.sender == _creator);
+	    require(SUPPLY_INDEX >= MAX_SUPPLY - CREATOR_RESERVED);
+	    require(SUPPLY_INDEX + count <= MAX_SUPPLY);
+		for (uint i=0; i<count; i++) {
+			cellGenerations[SUPPLY_INDEX] = GENERATION + 1;
+			_safeMint(to, SUPPLY_INDEX);
+			emit CreateCell(SUPPLY_INDEX);
+			SUPPLY_INDEX += 1;
+		}
     }
 
 	// Assign an IPFS pointer to a description.
@@ -103,22 +111,22 @@ contract Realm is ERC721, ERC721Enumerable, IERC721Receiver {
 		return cellContents[cellIndex][contentIndex].sealOwner != address(0);
 	}
 
-    // Stores an nft in this cell. Must approve this contract to spend the relevant nft before calling.
-	function putContent(uint256 cellIndex, uint256 contentIndex, address contractAddress, uint256 tokenId, uint256 sealValue) external {
+    // Stores an nft in this cell. Must approve this contract to spend the nft before calling.
+	function putContent(uint256 cellIndex, uint256 contentIndex, address contractAddress, uint256 tokenId, uint256 sealValue) external nonReentrant {
+		require(msg.sender == ownerOf(cellIndex), "Owner");
 		require(cellIndex < SUPPLY_INDEX, "Cell index");
 		require(contentIndex < MAX_CONTENTS, "Content index");
 		require(!_contentExists(cellIndex, contentIndex), "Content already");
-		require(msg.sender == ownerOf(cellIndex), "Owner");
 		IERC721 nft = IERC721(contractAddress);
 		nft.safeTransferFrom(msg.sender, address(this), tokenId);
 		cellContents[cellIndex][contentIndex] = CellContent(contractAddress, tokenId, msg.sender, sealValue);
 		emit PutContent(cellIndex, contractAddress, tokenId, sealValue, msg.sender);
 	}
 
-	function takeContent(uint256 cellIndex, uint256 contentIndex) external payable {
+	function takeContent(uint256 cellIndex, uint256 contentIndex) external payable nonReentrant {
+		require(msg.sender == ownerOf(cellIndex), "Owner");
 		require(cellIndex < SUPPLY_INDEX, "Cell index");
 		require(contentIndex < MAX_CONTENTS , "Content index");
-		require(msg.sender == ownerOf(cellIndex), "Owner");
 		require(_contentExists(cellIndex, contentIndex), "Nothing there");
 		CellContent memory content = cellContents[cellIndex][contentIndex];
 		require(msg.value >= content.sealValue, "Value too low");
@@ -128,14 +136,34 @@ contract Realm is ERC721, ERC721Enumerable, IERC721Receiver {
 		emit TakeContent(cellIndex, content.contractAddress, content.tokenId, content.sealValue, content.sealOwner, msg.sender);
 	}
 
+    // Connect two cells you own.
+    function createEdge(uint256 fromCellIndex, uint256 fromEdgeIndex, uint256 toCellIndex, uint256 toEdgeIndex) external {
+	    require(fromCellIndex > 0, "Cell index");
+		require(fromCellIndex < SUPPLY_INDEX, "Cell index");
+	    require(toCellIndex > 0, "Cell index");
+		require(toCellIndex < SUPPLY_INDEX, "Cell index");
+		require(fromEdgeIndex < MAX_EDGES, "Edge index");
+		require(toEdgeIndex < MAX_EDGES, "Edge index");
+		require(msg.sender == ownerOf(fromCellIndex), "Owner");
+		require(msg.sender == ownerOf(toCellIndex), "Owner");
+		require(edges[fromCellIndex][fromEdgeIndex] == 0, "Edge taken");
+		require(edges[toCellIndex][toEdgeIndex] == 0, "Edge taken");
+		_removeEdgeOffer(fromCellIndex, fromEdgeIndex);
+		edges[fromCellIndex][fromEdgeIndex] = toCellIndex;
+		edges[toCellIndex][toEdgeIndex] = fromCellIndex;
+		emit CreateEdge(fromCellIndex, fromEdgeIndex, toCellIndex, toEdgeIndex);
+    }
+
 	// Offer to connect one cell to another.
 	function offerEdge(uint256 fromCellIndex, uint256 fromEdgeIndex, uint256 toCellIndex) external {
 		require(fromCellIndex > 0, "Cell index");
-		require(fromCellIndex <= SUPPLY_INDEX, "Cell index");
+		require(fromCellIndex < SUPPLY_INDEX, "Cell index");
 	    require(toCellIndex > 0, "Cell index");
-		require(toCellIndex <= SUPPLY_INDEX, "Cell index");
+		require(toCellIndex < SUPPLY_INDEX, "Cell index");
 		require(fromEdgeIndex < MAX_EDGES, "Edge index");
 		require(msg.sender == ownerOf(fromCellIndex), "Owner");
+		require(edges[fromCellIndex][fromEdgeIndex] == 0, "Edge taken");
+		_removeEdgeOffer(fromCellIndex, fromEdgeIndex);
 		edgesOffered[fromCellIndex][fromEdgeIndex] = toCellIndex;
 		uint noffers = edgeOffersReceived[toCellIndex].length;
 		for (uint256 i = 0; i < noffers; i++) {
@@ -145,25 +173,26 @@ contract Realm is ERC721, ERC721Enumerable, IERC721Receiver {
 		emit OfferEdge(fromCellIndex, fromEdgeIndex, toCellIndex);
 	}
 
-	function withdrawEdgeOffer(uint256 fromCellIndex, uint256 fromEdgeIndex, uint256 toCellIndex) external {
+	function withdrawEdgeOffer(uint256 fromCellIndex, uint256 fromEdgeIndex) external {
 		require(fromCellIndex > 0, "Cell index");
-		require(fromCellIndex <= SUPPLY_INDEX, "Cell index");
-	    require(toCellIndex > 0, "Cell index");
-		require(toCellIndex <= SUPPLY_INDEX, "Cell index");
+		require(fromCellIndex < SUPPLY_INDEX, "Cell index");
 		require(fromEdgeIndex < MAX_EDGES, "Edge index");
 		require(msg.sender == ownerOf(fromCellIndex), "Owner");
+		require(edgesOffered[fromCellIndex][fromEdgeIndex] != 0, "No offer");
 		_removeEdgeOffer(fromCellIndex, fromEdgeIndex);
-		emit WithdrawEdgeOffer(fromCellIndex, fromEdgeIndex, toCellIndex);
+		emit WithdrawEdgeOffer(fromCellIndex, fromEdgeIndex);
 	}
 
 	function _removeEdgeOffer(uint256 fromCellIndex, uint256 fromEdgeIndex) internal {
-		if (edgesOffered[fromCellIndex][fromEdgeIndex] < SUPPLY_INDEX) {
+		if (edgesOffered[fromCellIndex][fromEdgeIndex] < SUPPLY_INDEX && edgesOffered[fromCellIndex][fromEdgeIndex] > 0) {
 			uint256 toCellIndex = edgesOffered[fromCellIndex][fromEdgeIndex];
-			edgesOffered[fromCellIndex][fromEdgeIndex] = SUPPLY_INDEX;
+			edgesOffered[fromCellIndex][fromEdgeIndex] = 0;
 			uint noffers = edgeOffersReceived[toCellIndex].length;
+			EdgeOfferFrom[] memory offers = edgeOffersReceived[toCellIndex];
 			for (uint256 i = 0; i < noffers; i++) {
-				if (edgeOffersReceived[toCellIndex][i].fromCellIndex == fromCellIndex && edgeOffersReceived[toCellIndex][i].fromEdgeIndex == fromEdgeIndex) {
-					edgeOffersReceived[toCellIndex][i] = EdgeOfferFrom(0, 0);
+				if (offers[i].fromCellIndex == fromCellIndex && offers[i].fromEdgeIndex == fromEdgeIndex) {
+					edgeOffersReceived[toCellIndex][i] = edgeOffersReceived[toCellIndex][noffers-1];
+					edgeOffersReceived[toCellIndex].pop();
 					return;
 				}
 			}
@@ -172,13 +201,14 @@ contract Realm is ERC721, ERC721Enumerable, IERC721Receiver {
 
 	function acceptEdgeOffer(uint256 fromCellIndex, uint256 fromEdgeIndex, uint256 toCellIndex, uint256 toEdgeIndex) external {
 	    require(fromCellIndex > 0, "Cell index");
-		require(fromCellIndex <= SUPPLY_INDEX, "Cell index");
+		require(fromCellIndex < SUPPLY_INDEX, "Cell index");
 	    require(toCellIndex > 0, "Cell index");
-		require(toCellIndex <= SUPPLY_INDEX, "Cell index");
+		require(toCellIndex < SUPPLY_INDEX, "Cell index");
 		require(fromEdgeIndex < MAX_EDGES, "Edge index");
 		require(toEdgeIndex < MAX_EDGES, "Edge index");
 		require(msg.sender == ownerOf(toCellIndex), "Owner");
-		require(edgesOffered[fromCellIndex][fromEdgeIndex] == toCellIndex, "Offer withdrawn");
+		require(edgesOffered[fromCellIndex][fromEdgeIndex] == toCellIndex, "No offer");
+		require(edges[toCellIndex][toEdgeIndex] == 0, "Edge taken");
 		_removeEdgeOffer(fromCellIndex, fromEdgeIndex);
 		edges[fromCellIndex][fromEdgeIndex] = toCellIndex;
 		edges[toCellIndex][toEdgeIndex] = fromCellIndex;
@@ -187,9 +217,10 @@ contract Realm is ERC721, ERC721Enumerable, IERC721Receiver {
 
 	function destroyEdge(uint256 cellIndex, uint256 edgeIndex) external {
 	    require(cellIndex > 0, "Cell index");
-		require(cellIndex <= SUPPLY_INDEX, "Cell index");
+		require(cellIndex < SUPPLY_INDEX, "Cell index");
 		require(edgeIndex < MAX_EDGES, "Edge index");
 		require(msg.sender == ownerOf(cellIndex), "Owner");
+		require(edges[cellIndex][edgeIndex] == 0, "Edge empty");
 		uint256 toCellIndex = edges[cellIndex][edgeIndex];
 		uint256 toEdgeIndex;
 		for (uint i = 0; i < MAX_EDGES; i++) {
@@ -201,10 +232,10 @@ contract Realm is ERC721, ERC721Enumerable, IERC721Receiver {
 	}
 
 	function withdrawAll() external payable {
-		require(msg.sender == _owner);
+		require(msg.sender == _creator);
 		uint256 balance = address(this).balance;
 		require(balance > 0);
-		_widthdraw(_owner, address(this).balance);
+		_widthdraw(_creator, address(this).balance);
 	}
 
 	function _widthdraw(address _address, uint256 _amount) internal {
@@ -237,17 +268,22 @@ contract Realm is ERC721, ERC721Enumerable, IERC721Receiver {
 	event CreateCell(uint256 indexed id);
 	event SetCellDescriptionId(uint256 cellIndex, string descId);
 	event OfferEdge(uint256 indexed fromCellIndex, uint256 fromEdgeIndex, uint256 indexed toCellIndex);
-	event WithdrawEdgeOffer(uint256 indexed fromCellIndex, uint256 fromEdgeIndex, uint256 indexed toCellIndex);
-	event AcceptEdgeOffer(uint256 indexed fromCellIndex, uint256 fromEdgeIndex, uint256 toCellIndex, uint256 toEdgeIndex);
-	event DestroyEdge(uint256 indexed fromCellIndex, uint256 fromEdgeIndex, uint256 toCellIndex, uint256 toEdgeIndex);
+	event WithdrawEdgeOffer(uint256 indexed fromCellIndex, uint256 fromEdgeIndex);
+	event AcceptEdgeOffer(uint256 indexed fromCellIndex, uint256 fromEdgeIndex, uint256 indexed toCellIndex, uint256 toEdgeIndex);
+	event CreateEdge(uint256 indexed fromCellIndex, uint256 fromEdgeIndex, uint256 indexed toCellIndex, uint256 toEdgeIndex);
+	event DestroyEdge(uint256 indexed fromCellIndex, uint256 fromEdgeIndex, uint256 indexed toCellIndex, uint256 toEdgeIndex);
 	event PutContent(uint256 cellIndex, address indexed contractAddress, uint256 tokenId, uint256 sealValue, address indexed sealOwner);
 	event TakeContent(uint256 cellIndex, address indexed contractAddress, uint256 tokenId, uint256 sealValue, address indexed sealOwner, address indexed takenBy);
 }
 
 library Util {
 	function _tokenURI(uint256 tokenId, string memory _tt) public pure returns (string memory) {
-        string memory a = '<svg xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMinYMin meet" viewBox="0 0 350 350"><style>.base { fill: white; font-family: serif; font-size: 14px; }</style><rect width="100%" height="100%" fill="black" /><text x="10" y="20" class="base">';
-		string memory output = string(abi.encodePacked(a, _tt));
+        string[4] memory parts;
+        parts[0] = '<svg xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMinYMin meet" viewBox="0 0 350 350"><style>.base { fill: white; font-family: serif; font-size: 14px; }</style><rect width="100%" height="100%" fill="black" /><text x="10" y="20" class="base">';
+        parts[1] = string(abi.encodePacked('Cell #', toString(tokenId)));
+        parts[2] = '</text><text x="10" y="40" class="base">';
+        parts[3] = _tt;
+		string memory output = string(abi.encodePacked(parts[0], parts[1], parts[2], parts[3]));
         string memory json = Base64.encode(bytes(string(abi.encodePacked('{"name": "Cell #', toString(tokenId), '", "description": "This is the REALM. It exists to build upon.", "image": "data:image/svg+xml;base64,', Base64.encode(bytes(output)), '"}'))));
         return string(abi.encodePacked('data:application/json;base64,', json));
     }
@@ -336,3 +372,4 @@ library Base64 {
         return string(result);
     }
 }
+
